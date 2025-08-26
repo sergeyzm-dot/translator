@@ -110,7 +110,7 @@ export async function POST(req: NextRequest) {
         } = await req.json();
 
         // --- ДОБАВЬТЕ ПРОВЕРКУ ---
-        const allowedModels = ["gpt-4o-mini", "gpt-5-mini"];
+        const allowedModels = ["gpt-4o-mini", "gpt-5", "gpt-4o", "gpt-4", "gpt-3.5-turbo"];
         if (!allowedModels.includes(model)) {
           send({ type: "error", message: "Unsupported model" });
           controller.close();
