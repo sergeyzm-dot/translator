@@ -41,6 +41,7 @@ const languages = [
 
 const models = [
   { id: 'gpt-4o-mini', name: 'GPT-4o Mini (Fast & Cost-effective)'},
+  { id: 'gpt-5-mini', name: 'GPT-5 Mini (Experimental)' },
   { id: 'gpt-4o', name: 'GPT-4o (Balanced)' },
   { id: 'gpt-4', name: 'GPT-4 (Highest Quality)' },
   { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo (Budget)' },

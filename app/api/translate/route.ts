@@ -105,9 +105,17 @@ export async function POST(req: NextRequest) {
           fileUrl,
           sourceLang = "English",
           targetLang = "Russian",
-          model = "gpt-4o-mini",
+          model = "gpt-4o-mini", // ← по умолчанию
           chunkSizePages = DEFAULT_CHUNK_PAGES,
         } = await req.json();
+
+        // --- ДОБАВЬТЕ ПРОВЕРКУ ---
+        const allowedModels = ["gpt-4o-mini", "gpt-5-mini"];
+        if (!allowedModels.includes(model)) {
+          send({ type: "error", message: "Unsupported model" });
+          controller.close();
+          return;
+        }
 
         if (!fileUrl) {
           send({ type: "error", message: "Missing fileUrl" });
@@ -185,7 +193,7 @@ export async function POST(req: NextRequest) {
               const prompt = `${systemPrompt(sourceLang, targetLang)}\n\n${textChunk}`;
 
               const resp = await openai.chat.completions.create({
-                model,
+                model, // ← теперь можно передавать gpt-5-mini
                 messages: [
                   { role: "system", content: "You are a precise translator." },
                   { role: "user", content: prompt },
