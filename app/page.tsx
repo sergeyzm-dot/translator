@@ -55,7 +55,6 @@ export default function Home() {
   const [result, setResult] = useState<TranslationResult | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploadId, setUploadId] = useState<string | null>(null);
 
   // безопасный доступ к переменной окружения
   const DONATE_LINK = process.env.NEXT_PUBLIC_DONATION_LINK ?? '';
@@ -104,7 +103,7 @@ export default function Home() {
         throw new Error(error.message || 'Upload failed');
       }
       const data = await response.json();
-      return data.uploadId as string;
+      return data.fileUrl as string; // <-- теперь fileUrl
     } catch (error) {
       console.error('Upload error:', error);
       setProgress({ stage: 'error', message: error instanceof Error ? error.message : 'Upload failed' });
@@ -113,15 +112,14 @@ export default function Home() {
     }
   };
 
-  const translateFile = async () => {
-    if (!uploadId) return;
+  const translateFile = async (fileUrl: string) => {
     setProgress({ stage: 'translating', message: 'Starting translation...' });
 
     try {
       const response = await fetch('/api/translate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uploadId, sourceLang, targetLang, model }),
+        body: JSON.stringify({ fileUrl, sourceLang, targetLang, model }),
       });
 
       if (!response.ok) {
@@ -173,10 +171,9 @@ export default function Home() {
 
   const handleTranslate = async () => {
     if (!file) return;
-    const id = await uploadFile();
-    if (!id) return;
-    setUploadId(id);
-    await translateFile();
+    const url = await uploadFile();
+    if (!url) return;
+    await translateFile(url); // <-- передаём url
   };
 
   const handlePayment = async (amount: number) => {
@@ -352,7 +349,6 @@ export default function Home() {
                       </div>
                     </div>
                     <Button asChild className="bg-green-600 hover:bg-green-700 text-white">
-                      {/* прямая ссылка из Vercel Blob; открываем в новой вкладке и помечаем как загрузку DOCX */}
                       <a href={result.downloadUrl} target="_blank" rel="noopener noreferrer" download>
                         <Download className="w-4 h-4 mr-2" />
                         Download DOCX
