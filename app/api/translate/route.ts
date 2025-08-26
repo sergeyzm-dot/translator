@@ -105,12 +105,17 @@ export async function POST(req: NextRequest) {
           fileUrl,
           sourceLang = "English",
           targetLang = "Russian",
-          model = "gpt-4o-mini", // ← по умолчанию
-          chunkSizePages = DEFAULT_CHUNK_PAGES,
+          model = "gpt-4o-mini",          chunkSizePages = DEFAULT_CHUNK_PAGES,
         } = await req.json();
 
         // --- ДОБАВЬТЕ ПРОВЕРКУ ---
-        const allowedModels = ["gpt-4o-mini", "gpt-5", "gpt-4o", "gpt-4", "gpt-3.5-turbo"];
+        const allowedModels = [
+          "gpt-4o-mini",
+          "gpt-5-mini", // ← добавлено
+          "gpt-4o",
+          "gpt-4",
+          "gpt-3.5-turbo"
+        ];
         if (!allowedModels.includes(model)) {
           send({ type: "error", message: "Unsupported model" });
           controller.close();
