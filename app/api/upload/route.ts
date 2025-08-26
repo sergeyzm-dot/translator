@@ -7,7 +7,7 @@ export const dynamic = 'force-dynamic';
 export const fetchCache = 'force-no-store';
 export const revalidate = 0;
 
-const MAX_SIZE = 25 * 1024 * 1024; // 25MB
+const MAX_SIZE = 25 * 1024 * 1024; // 25MB как на фронте
 
 export async function POST(req: NextRequest) {
   try {
@@ -24,26 +24,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ message: 'File too large (max 25MB)' }, { status: 400 });
     }
 
-    const token = process.env.BLOB_READ_WRITE_TOKEN;
-    if (!token) {
-      return NextResponse.json({ message: 'Blob token is not configured' }, { status: 500 });
-    }
-
-    // Генерируем уникальное имя
-    const fileName = `uploads/${crypto.randomUUID()}.pdf`;
-
-    // Отправляем в Blob
-    const { url } = await put(fileName, file, {
+    // Кладём напрямую в Vercel Blob (никаких temp/ папок)
+    const key = `uploads/${crypto.randomUUID()}.pdf`;
+    const { url } = await put(key, file, {
       access: 'private',
-      token,
       addRandomSuffix: false,
       contentType: 'application/pdf',
+      // token: process.env.BLOB_READ_WRITE_TOKEN, // можно не указывать — Vercel сам подставит из env
     });
 
-    // Ключ — это path (имя) внутри стора; сохраняем его для последующего чтения
-    return NextResponse.json({ uploadId: fileName, blobUrl: url }, { status: 200 });
+    // фронтенд ждёт uploadId — отдаём ключ blob'а
+    return NextResponse.json({ uploadId: key, blobUrl: url }, { status: 200 });
   } catch (err: any) {
     console.error('Upload API error:', err);
-    return NextResponse.json({ message: err?.message || 'Upload failed' }, { status: 500 });
+    return NextResponse.json(
+      { message: err?.message || 'Upload failed' },
+      { status: 500 }
+    );
   }
 }
