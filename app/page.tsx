@@ -17,7 +17,7 @@ interface TranslationProgress {
 }
 
 interface TranslationResult {
-  downloadUrl: string;
+  downloadUrl: string; // абсолютный URL из Vercel Blob
   pagesProcessed: number;
   model: string;
   tokenUsage?: {
@@ -85,7 +85,6 @@ export default function Home() {
     e.preventDefault();
     setIsDragOver(true);
   }, []);
-
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
@@ -94,6 +93,7 @@ export default function Home() {
   const uploadFile = async () => {
     if (!file) return null;
     setProgress({ stage: 'uploading', message: 'Uploading PDF...' });
+
     const formData = new FormData();
     formData.append('pdf', file);
 
@@ -140,28 +140,27 @@ export default function Home() {
         const lines = chunk.split('\n').filter((line) => line.trim());
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.type === 'progress') {
-                setProgress({
-                  stage: 'translating',
-                  currentChunk: data.currentChunk,
-                  totalChunks: data.totalChunks,
-                  message: `Translating chunk ${data.currentChunk}/${data.totalChunks}...`,
-                });
-              } else if (data.type === 'building') {
-                setProgress({ stage: 'building', message: 'Building DOCX file...' });
-              } else if (data.type === 'completed') {
-                setProgress({ stage: 'completed', message: 'Translation completed!' });
-                setResult(data.result);
-                toast.success('Translation completed successfully!');
-              } else if (data.type === 'error') {
-                throw new Error(data.message);
-              }
-            } catch (e) {
-              console.error('Error parsing SSE data:', e);
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === 'progress') {
+              setProgress({
+                stage: 'translating',
+                currentChunk: data.currentChunk,
+                totalChunks: data.totalChunks,
+                message: `Translating chunk ${data.currentChunk}/${data.totalChunks}...`,
+              });
+            } else if (data.type === 'building') {
+              setProgress({ stage: 'building', message: 'Building DOCX file...' });
+            } else if (data.type === 'completed') {
+              setProgress({ stage: 'completed', message: 'Translation completed!' });
+              setResult(data.result as TranslationResult);
+              toast.success('Translation completed successfully!');
+            } else if (data.type === 'error') {
+              throw new Error(data.message);
             }
+          } catch (e) {
+            console.error('Error parsing SSE data:', e);
           }
         }
       }
@@ -353,7 +352,8 @@ export default function Home() {
                       </div>
                     </div>
                     <Button asChild className="bg-green-600 hover:bg-green-700 text-white">
-                      <a href={result.downloadUrl} download>
+                      {/* прямая ссылка из Vercel Blob; открываем в новой вкладке и помечаем как загрузку DOCX */}
+                      <a href={result.downloadUrl} target="_blank" rel="noopener noreferrer" download>
                         <Download className="w-4 h-4 mr-2" />
                         Download DOCX
                       </a>
