@@ -1,31 +1,18 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  productionBrowserSourceMaps: false,
-  swcMinify: false,
+  reactStrictMode: true,
 
-  // Подсказываем Next не тянуть тяжёлые пакеты в RSC-бандл
-  experimental: {
-    serverComponentsExternalPackages: ['pdf-parse', 'docx'],
-  },
+  // было: experimental.serverComponentsExternalPackages
+  // стало:
+  serverExternalPackages: [
+    'pdf-parse',
+    'docx',
+    'openai',
+    'stripe',
+  ],
 
-  webpack: (config, { isServer }) => {
-    // 🔧 1) Полностью отключаем файловый кэш webpack (PackFileCacheStrategy)
-    //    Это снимает ошибку: [webpack.cache.PackFileCacheStrategy] ... Out of memory
-    config.cache = false;
-
-    if (isServer) {
-      // 🔧 2) Не бандлим тяжёлые нодовые пакеты в серверный бандл — пусть резолвятся в рантайме
-      config.externals = [
-        ...(config.externals || []),
-        {
-          'pdf-parse': 'commonjs pdf-parse',
-          'docx': 'commonjs docx',
-        },
-      ];
-    }
-
-    return config;
-  },
+  // swcMinify больше не нужен в Next 15
+  // swcMinify: true,  // ← удалить
 };
 
 module.exports = nextConfig;
