@@ -1,8 +1,9 @@
 // app/api/translate/route.ts
 import { NextRequest } from 'next/server';
-import { list, get, put } from '@vercel/blob';
+import { get, put } from '@vercel/blob';
+import { randomUUID } from 'crypto';
 
-export const runtime = 'nodejs';
+export const runtime = 'nodejs';              // нужен Node для pdf-parse и docx
 export const dynamic = 'force-dynamic';
 export const fetchCache = 'force-no-store';
 
@@ -94,16 +95,12 @@ export async function POST(request: NextRequest) {
           send({ type: 'error', message: 'OpenAI API key not configured' });
           controller.close(); return;
         }
-        if (!process.env.BLOB_READ_WRITE_TOKEN) {
-          send({ type: 'error', message: 'Blob token not configured' });
-          controller.close(); return;
-        }
         if (!uploadId) {
           send({ type: 'error', message: 'No upload ID provided' });
           controller.close(); return;
         }
 
-        // Ленивая загрузка тяжёлых модулей
+        // ленивые импорты тяжёлых lib
         const [{ default: pdf }, { default: OpenAI }] = await Promise.all([
           import('pdf-parse'),
           import('openai'),
@@ -112,20 +109,18 @@ export async function POST(request: NextRequest) {
 
         const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-        // 1) Читаем PDF из Blob
-        // uploadId — это ключ (например, "uploads/<uuid>.pdf")
-        const pdfBlob = await get(uploadId, { token: process.env.BLOB_READ_WRITE_TOKEN });
-        if (!pdfBlob?.downloadUrl) {
+        // 1) берём PDF из Blob по ключу (uploadId)
+        const meta = await get(uploadId);
+        if (!meta?.downloadUrl) {
           send({ type: 'error', message: 'Uploaded file not found in Blob' });
           controller.close(); return;
         }
 
-        // Скачиваем как ArrayBuffer
-        const ab = await (await fetch(pdfBlob.downloadUrl)).arrayBuffer();
-        const pdfBuffer = Buffer.from(ab);
-
-        // 2) Парсим PDF
+        // 2) скачиваем бинарник и парсим
         send({ type: 'progress', message: 'Extracting text from PDF...' });
+        const pdfResp = await fetch(meta.downloadUrl);
+        const pdfBuffer = Buffer.from(await pdfResp.arrayBuffer());
+
         const pdfData = await pdf(pdfBuffer);
         const extracted = (pdfData.text || '').trim();
         if (!extracted) {
@@ -133,7 +128,7 @@ export async function POST(request: NextRequest) {
           controller.close(); return;
         }
 
-        // 3) Переводим чанками
+        // 3) перевод чанками
         const chunks = chunkText(extracted);
         const translatedChunks: string[] = [];
 
@@ -158,9 +153,8 @@ export async function POST(request: NextRequest) {
           translatedChunks.push(sanitizeDocx(translated));
         }
 
-        // 4) Собираем DOCX
+        // 4) собираем DOCX
         send({ type: 'building', message: 'Building DOCX file...' });
-
         const doc = new Document({
           sections: [
             {
@@ -175,17 +169,16 @@ export async function POST(request: NextRequest) {
 
         const buffer = await Packer.toBuffer(doc);
 
-        // 5) Кладём DOCX в Blob (private)
-        const outKey = `results/${crypto.randomUUID()}.docx`;
-        const putRes = await put(outKey, buffer, {
+        // 5) кладём DOCX в Blob
+        const outKey = `results/${randomUUID()}.docx`;
+        await put(outKey, buffer, {
           access: 'private',
-          token: process.env.BLOB_READ_WRITE_TOKEN!,
           addRandomSuffix: false,
           contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         });
 
         const result = {
-          downloadUrl: `/api/download?key=${encodeURIComponent(outKey)}`, // подпишем через download роут
+          downloadUrl: `/api/download?key=${encodeURIComponent(outKey)}`,
           pagesProcessed: pdfData?.info?.numpages ?? Math.max(1, Math.ceil(extracted.length / 2000)),
           model: model || 'gpt-4o-mini',
           tokenUsage: {
@@ -197,8 +190,7 @@ export async function POST(request: NextRequest) {
         send({ type: 'completed', result });
       } catch (error: any) {
         console.error('Translate route error:', error);
-        const msg = error?.message || 'Translation failed';
-        send({ type: 'error', message: msg });
+        send({ type: 'error', message: error?.message || 'Translation failed' });
       }
       controller.close();
     },
