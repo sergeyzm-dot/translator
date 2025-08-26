@@ -317,6 +317,16 @@ export default function Home() {
               </div>
 
               {/* Progress */}
+              // внутри цикла разбора SSE:
+              if (data.type === 'init') {
+                setProgress({
+                stage: 'translating',
+                currentChunk: 0,
+                totalChunks: data.totalChunks,
+                 message: data.message || `Preparing ${data.totalChunks} chunks...`,
+               });
+               continue;
+              }
               {progress.stage !== 'idle' && (
                 <div className="space-y-3">
                   <div className="flex justify-between text-sm">
