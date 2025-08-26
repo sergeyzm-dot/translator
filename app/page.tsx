@@ -40,7 +40,7 @@ const languages = [
 ];
 
 const models = [
-  { id: 'gpt-4o-mini', name: 'GPT-4o Mini (Fast & Cost-effective)' },
+  { id: 'gpt-4o-mini', name: 'GPT-4o Mini (Fast & Cost-effective)'},
   { id: 'gpt-4o', name: 'GPT-4o (Balanced)' },
   { id: 'gpt-4', name: 'GPT-4 (Highest Quality)' },
   { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo (Budget)' },
@@ -131,6 +131,7 @@ export default function Home() {
       const reader = response.body?.getReader();
       if (!reader) throw new Error('No response stream');
 
+      // читаем SSE построчно
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -144,7 +145,6 @@ export default function Home() {
           try {
             const data = JSON.parse(line.slice(6));
 
-            // ИНИЦИАЛИЗАЦИЯ (общее кол-во чанков)
             if (data.type === 'init') {
               setProgress({
                 stage: 'translating',
@@ -181,10 +181,7 @@ export default function Home() {
               throw new Error(data.message);
             }
 
-            // необязательный heartbeat игнорируем
-            if (data.type === 'heartbeat') {
-              continue;
-            }
+            // heartbeat/прочее — игнорируем
           } catch (e) {
             console.error('Error parsing SSE data:', e);
           }
@@ -225,8 +222,9 @@ export default function Home() {
       case 'uploading': return 10;
       case 'extracting': return 20;
       case 'translating':
-        if (progress.currentChunk && progress.totalChunks)
+        if (progress.currentChunk && progress.totalChunks) {
           return 20 + (progress.currentChunk / progress.totalChunks) * 60;
+        }
         return 30;
       case 'building': return 85;
       case 'completed': return 100;
@@ -298,7 +296,7 @@ export default function Home() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Source Language</label>
                   <Select value={sourceLang} onValueChange={setSourceLang} disabled={isProcessing}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger><SelectValue placeholder="Choose source language" /></SelectTrigger>
                     <SelectContent>
                       {languages.map((lang) => (
                         <SelectItem key={lang.code} value={lang.code}>{lang.name}</SelectItem>
@@ -310,7 +308,7 @@ export default function Home() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Target Language</label>
                   <Select value={targetLang} onValueChange={setTargetLang} disabled={isProcessing}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger><SelectValue placeholder="Choose target language" /></SelectTrigger>
                     <SelectContent>
                       {languages.map((lang) => (
                         <SelectItem key={lang.code} value={lang.code}>{lang.name}</SelectItem>
@@ -322,7 +320,7 @@ export default function Home() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">AI Model</label>
                   <Select value={model} onValueChange={setModel} disabled={isProcessing}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger><SelectValue placeholder="Choose model" /></SelectTrigger>
                     <SelectContent>
                       {models.map((m) => (
                         <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
@@ -425,7 +423,7 @@ export default function Home() {
           <div className="text-center space-y-2 text-sm text-gray-500">
             <p>
               <strong>Privacy:</strong> All files are automatically deleted within 24 hours.
-              We don&rsquo;t store your documents or translations.
+              We don’t store your documents or translations.
             </p>
             <p>
               Questions? Contact us at{' '}
