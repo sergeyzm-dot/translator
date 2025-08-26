@@ -103,7 +103,8 @@ export default function Home() {
         throw new Error(error.message || 'Upload failed');
       }
       const data = await response.json();
-      return data.fileUrl as string; // <-- теперь fileUrl
+      // сервер возвращает прямой blob url
+      return data.fileUrl as string;
     } catch (error) {
       console.error('Upload error:', error);
       setProgress({ stage: 'error', message: error instanceof Error ? error.message : 'Upload failed' });
@@ -139,8 +140,21 @@ export default function Home() {
 
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
+
           try {
             const data = JSON.parse(line.slice(6));
+
+            // ИНИЦИАЛИЗАЦИЯ (общее кол-во чанков)
+            if (data.type === 'init') {
+              setProgress({
+                stage: 'translating',
+                currentChunk: 0,
+                totalChunks: data.totalChunks,
+                message: data.message || `Preparing ${data.totalChunks} chunks...`,
+              });
+              continue;
+            }
+
             if (data.type === 'progress') {
               setProgress({
                 stage: 'translating',
@@ -148,14 +162,28 @@ export default function Home() {
                 totalChunks: data.totalChunks,
                 message: `Translating chunk ${data.currentChunk}/${data.totalChunks}...`,
               });
-            } else if (data.type === 'building') {
+              continue;
+            }
+
+            if (data.type === 'building') {
               setProgress({ stage: 'building', message: 'Building DOCX file...' });
-            } else if (data.type === 'completed') {
+              continue;
+            }
+
+            if (data.type === 'completed') {
               setProgress({ stage: 'completed', message: 'Translation completed!' });
               setResult(data.result as TranslationResult);
               toast.success('Translation completed successfully!');
-            } else if (data.type === 'error') {
+              continue;
+            }
+
+            if (data.type === 'error') {
               throw new Error(data.message);
+            }
+
+            // необязательный heartbeat игнорируем
+            if (data.type === 'heartbeat') {
+              continue;
             }
           } catch (e) {
             console.error('Error parsing SSE data:', e);
@@ -173,7 +201,7 @@ export default function Home() {
     if (!file) return;
     const url = await uploadFile();
     if (!url) return;
-    await translateFile(url); // <-- передаём url
+    await translateFile(url);
   };
 
   const handlePayment = async (amount: number) => {
@@ -317,16 +345,6 @@ export default function Home() {
               </div>
 
               {/* Progress */}
-              // внутри цикла разбора SSE:
-              if (data.type === 'init') {
-                setProgress({
-                stage: 'translating',
-                currentChunk: 0,
-                totalChunks: data.totalChunks,
-                 message: data.message || `Preparing ${data.totalChunks} chunks...`,
-               });
-               continue;
-              }
               {progress.stage !== 'idle' && (
                 <div className="space-y-3">
                   <div className="flex justify-between text-sm">
@@ -359,6 +377,7 @@ export default function Home() {
                       </div>
                     </div>
                     <Button asChild className="bg-green-600 hover:bg-green-700 text-white">
+                      {/* прямая ссылка из Vercel Blob; открываем в новой вкладке и помечаем как загрузку DOCX */}
                       <a href={result.downloadUrl} target="_blank" rel="noopener noreferrer" download>
                         <Download className="w-4 h-4 mr-2" />
                         Download DOCX
