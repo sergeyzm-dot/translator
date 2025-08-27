@@ -55,15 +55,45 @@ async function lazyLoadHeavy() {
   return { pdfParse, docx };
 }
 
-// --- Новый вспомогательный fallback через pdfjs-dist ---
+// --- УСТОЙЧИВЫЙ вспомогательный fallback через pdfjs-dist ---
 // (динамически импортируется только при необходимости)
+// Пробуем несколько путей импорта, т.к. разные версии пакета имеют разные entry points.
 async function extractTextWithPdfJs(buffer: Buffer | Uint8Array) {
-  // импортируем только при реальной необходимости (не грузим всегда)
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.js");
-  // Если нужно, можно настроить workerSrc, но в node-окружении это не требуется.
-  const uint8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const tryImportPdfJs = async () => {
+    const candidates = [
+      'pdfjs-dist/legacy/build/pdf.js',
+      'pdfjs-dist/build/pdf.js',
+      'pdfjs-dist'
+    ];
+    let lastErr: any = null;
+    for (const p of candidates) {
+      try {
+        // динамический import — позволит Vercel/webpack определить модуль в рантайме
+        const mod = await import(p);
+        return mod;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw new Error(`Cannot import pdfjs-dist (tried multiple paths). Last error: ${String(lastErr)}`);
+  };
 
-  const loadingTask = pdfjs.getDocument({ data: uint8 });
+  const pdfjsModule: any = await tryImportPdfJs();
+
+  // Найдём getDocument — модуль может экспортироваться по-разному
+  const getDocument =
+    pdfjsModule.getDocument ??
+    pdfjsModule.default?.getDocument ??
+    pdfjsModule.PDFJS?.getDocument ??
+    pdfjsModule.getDocument?.default ??
+    null;
+
+  if (!getDocument) {
+    throw new Error('pdfjs-dist was imported but getDocument() entry point was not found.');
+  }
+
+  const uint8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const loadingTask = getDocument({ data: uint8 });
   const doc = await loadingTask.promise;
   const numPages = doc.numPages || 0;
   let fullText = "";
@@ -71,9 +101,16 @@ async function extractTextWithPdfJs(buffer: Buffer | Uint8Array) {
   for (let p = 1; p <= numPages; p++) {
     const page = await doc.getPage(p);
     const content = await page.getTextContent();
-    // content.items содержит объекты с полем .str (или similar)
-    const pageText = content.items.map((it: any) => (it && (it.str || it.toString()) ? it.str || String(it) : "")).join(" ");
-    fullText += (fullText ? "\n\n" : "") + pageText;
+
+    // content.items — массив объектов, у которых обычно есть .str
+    const pageText = (content.items || []).map((it: any) => {
+      if (!it) return '';
+      if (typeof it === 'string') return it;
+      if (typeof it.str === 'string') return it.str;
+      return String(it?.toString?.() ?? '');
+    }).join(' ');
+
+    fullText += (fullText ? '\n\n' : '') + pageText;
   }
 
   return { text: fullText.trim(), numPages };
