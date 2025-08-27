@@ -13,6 +13,10 @@ const DEFAULT_CHUNK_PAGES = 20;     // сколько "страниц" в одн
 const PARALLEL_LIMIT = 3;           // сколько чанков переводим одновременно
 const HARD_TIME_LIMIT_MS = 290_000; // на 290-й секунде начинаем сборку Word
 
+// таймауты и ретраи для отдельных вызовов LLM
+const CHUNK_REQUEST_TIMEOUT_MS = 60_000; // таймаут одного запроса к OpenAI
+const CHUNK_REQUEST_RETRIES = 1;         // сколько дополнительных попыток делать при ошибке
+
 // легкая санитация текста для DOCX (убрать недопустимые символы)
 function sanitize(s: string) {
   return (s ?? "")
@@ -91,6 +95,21 @@ async function buildAndUploadDocx(
   return url;
 }
 
+// helper: обёртка промиса с таймаутом
+function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout?: () => void): Promise<T> {
+  let timeoutId: NodeJS.Timeout;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      if (onTimeout) onTimeout();
+      reject(new Error(`Timeout after ${ms}ms`));
+    }, ms);
+  });
+  return Promise.race([
+    promise.finally(() => clearTimeout(timeoutId)),
+    timeoutPromise,
+  ]) as Promise<T>;
+}
+
 export async function POST(req: NextRequest) {
   const encoder = new TextEncoder();
   const startAt = Date.now();
@@ -105,13 +124,13 @@ export async function POST(req: NextRequest) {
           fileUrl,
           sourceLang = "English",
           targetLang = "Russian",
-          model = "gpt-4o-mini",          chunkSizePages = DEFAULT_CHUNK_PAGES,
+          model = "gpt-4o-mini",
+          chunkSizePages = DEFAULT_CHUNK_PAGES,
         } = await req.json();
 
-        // --- ДОБАВЬТЕ ПРОВЕРКУ ---
         const allowedModels = [
           "gpt-4o-mini",
-          "gpt-5-mini", // ← добавлено
+          "gpt-5-mini",
           "gpt-4o",
           "gpt-4",
           "gpt-3.5-turbo"
@@ -145,7 +164,7 @@ export async function POST(req: NextRequest) {
 
         // вытаскиваем текст и число страниц
         const { pdfParse } = await lazyLoadHeavy();
-        send({ type: "log", message: "Extracting text..." });
+        send({ type: "log", message: "Extracting text from PDF..." });
         const pdfData = await pdfParse(pdfBuffer);
         const totalPages = pdfData?.info?.numpages ?? 0;
         const fullText = (pdfData?.text ?? "").trim();
@@ -156,24 +175,103 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        // расщепляем на "страницы", затем группируем по 20 "страниц" в чанк
+        // расщепляем на "страницы", затем группируем по chunkSizePages в чанк
         const pageTexts = splitTextByPages(fullText, Math.max(1, totalPages || 1));
         const pageChunks = groupBy(pageTexts, Math.max(1, chunkSizePages));
         const totalChunks = pageChunks.length;
 
-        // init: сообщаем кол-во страниц (по-английски, как просил)
         send({
           type: "init",
           totalChunks,
           message: `Total pages in document – ${totalPages || "unknown"}`,
         });
 
-        // батчи по PARALLEL_LIMIT чанков
+        // Обёртка перевода одного чанка с таймаутом и ретраями и метриками
+        async function translateChunkWithRetries(textChunk: string, idx: number): Promise<{ text: string; ok: boolean; usage?: any; durationMs?: number; error?: string }> {
+          let lastErr: any = null;
+          for (let attempt = 0; attempt <= CHUNK_REQUEST_RETRIES; attempt++) {
+            const attemptLabel = attempt + 1;
+            const t0 = Date.now();
+            try {
+              send({ type: "log", message: `Translating chunk ${idx} (attempt ${attemptLabel})...` });
+
+              const prompt = `${systemPrompt(sourceLang, targetLang)}\n\n${textChunk}`;
+
+              // сам вызов к OpenAI, оборачиваем в таймаут
+              const call = openai.chat.completions.create({
+                model,
+                messages: [
+                  { role: "system", content: "You are a precise translator." },
+                  { role: "user", content: prompt },
+                ],
+                temperature: 0,
+              });
+
+              const resp: any = await withTimeout(call, CHUNK_REQUEST_TIMEOUT_MS, () => {
+                send({ type: "log", message: `Chunk ${idx}: request timed out after ${CHUNK_REQUEST_TIMEOUT_MS}ms (attempt ${attemptLabel})` });
+              });
+
+              const t1 = Date.now();
+              const duration = t1 - t0;
+
+              const out = sanitize(resp.choices?.[0]?.message?.content ?? "");
+              const usage = resp?.usage ?? {};
+              const promptTokens = usage.prompt_tokens ?? usage.promptTokens ?? 0;
+              const completionTokens = usage.completion_tokens ?? usage.completionTokens ?? 0;
+
+              // шлём событие о завершённом чанке с метрикой
+              send({
+                type: "chunk",
+                index: idx,
+                durationMs: duration,
+                textLength: out.length,
+                ok: true,
+                promptTokens,
+                completionTokens,
+              });
+
+              return { text: out, ok: true, usage, durationMs: duration };
+            } catch (err: any) {
+              lastErr = err;
+              const t1 = Date.now();
+              const duration = t1 - t0;
+              send({ type: "log", message: `Chunk ${idx} error on attempt ${attemptLabel}: ${err?.message || String(err)}` });
+              // отправляем частичную метрику о неудаче (позволит UI отобразить last latency)
+              send({
+                type: "chunk",
+                index: idx,
+                durationMs: duration,
+                textLength: 0,
+                ok: false,
+                attempt: attemptLabel,
+                error: err?.message ?? String(err),
+              });
+
+              // короткая пауза перед ретраем
+              if (attempt < CHUNK_REQUEST_RETRIES) {
+                // небольшой экспоненциальный бекофф
+                const backoffMs = 500 * Math.pow(2, attempt);
+                await new Promise((r) => setTimeout(r, backoffMs));
+                continue;
+              }
+            }
+          }
+          // если все попытки не удались — возвращаем пустой текст и пометку
+          send({ type: "log", message: `Chunk ${idx} failed after ${CHUNK_REQUEST_RETRIES + 1} attempts` });
+          return { text: "", ok: false, usage: null, durationMs: undefined, error: lastErr?.message ?? String(lastErr) };
+        }
+
+        // Разбиваем на батчи и переводим
         const batches = groupBy(pageChunks, PARALLEL_LIMIT);
         let translatedSoFar = 0;
-        const translated: string[] = []; // сюда складываем перевод по мере готовности
+        const translated: string[] = [];
+        let failedChunks = 0;
 
-        // основной цикл по батчам
+        // агрегированные метрики
+        const chunkDurations: number[] = [];
+        let totalPromptTokens = 0;
+        let totalCompletionTokens = 0;
+
         for (let b = 0; b < batches.length; b++) {
           const batch = batches[b];
           const batchLabel = `${b + 1}/${batches.length}`;
@@ -190,33 +288,36 @@ export async function POST(req: NextRequest) {
 
           send({ type: "log", message: `⚡ Started batch ${batchLabel} (size ${batch.length})` });
 
-          // параллельный перевод чанков батча
-          const results = await Promise.allSettled(
-            batch.map(async (pages) => {
-              // склеиваем "страницы" батча в текст чанка
-              const textChunk = pages.join("\n\n");
-              const prompt = `${systemPrompt(sourceLang, targetLang)}\n\n${textChunk}`;
+          // каждая задача переводит один chunk (набор "страниц")
+          const tasks = batch.map(async (pages, i) => {
+            const chunkIndexGlobal = b * PARALLEL_LIMIT + i + 1; // 1-based for logs
+            const textChunk = pages.join("\n\n");
+            const res = await translateChunkWithRetries(textChunk, chunkIndexGlobal);
+            return { res, chunkIndexGlobal };
+          });
 
-              const resp = await openai.chat.completions.create({
-                model, // ← теперь можно передавать gpt-5-mini
-                messages: [
-                  { role: "system", content: "You are a precise translator." },
-                  { role: "user", content: prompt },
-                ],
-                temperature: 0,
-              });
+          // Promise.allSettled можно оставить, но каждый таск уже имеет свои таймауты и ретраи
+          const results = await Promise.allSettled(tasks);
 
-              const out = sanitize(resp.choices[0]?.message?.content ?? "");
-              return out;
-            })
-          );
-
-          // собираем готовые чанки, шлем прогресс
           for (const r of results) {
             if (r.status === "fulfilled") {
-              translated.push(r.value);
+              const value = r.value;
+              const v = value.res;
+              translated.push(v.text);
+              if (!v.ok) failedChunks++;
+              if (v.durationMs !== undefined) chunkDurations.push(v.durationMs);
+              if (v.usage) {
+                const usage = v.usage;
+                const p = usage.prompt_tokens ?? usage.promptTokens ?? 0;
+                const c = usage.completion_tokens ?? usage.completionTokens ?? 0;
+                totalPromptTokens += Number(p || 0);
+                totalCompletionTokens += Number(c || 0);
+              }
             } else {
-              translated.push(""); // чтобы не ломать порядок; можно логировать подробнее
+              // если промис упал — учитываем как неуспешный
+              translated.push("");
+              failedChunks++;
+              send({ type: "log", message: `A chunk promise was rejected: ${String(r.reason)}` });
             }
             translatedSoFar++;
             send({
@@ -224,6 +325,23 @@ export async function POST(req: NextRequest) {
               currentChunk: translatedSoFar,
               totalChunks,
               message: `Translated chunk ${translatedSoFar}/${totalChunks}`,
+            });
+
+            // агрегированные метрики после каждого чанка
+            const avg =
+              chunkDurations.length > 0
+                ? Math.round(chunkDurations.reduce((a, b) => a + b, 0) / chunkDurations.length)
+                : 0;
+            const last = chunkDurations.length > 0 ? chunkDurations[chunkDurations.length - 1] : 0;
+
+            send({
+              type: "metrics",
+              averageLatencyMs: avg,
+              lastLatencyMs: last,
+              completedChunks: translatedSoFar,
+              failedChunks,
+              totalPromptTokens: totalPromptTokens || undefined,
+              totalCompletionTokens: totalCompletionTokens || undefined,
             });
           }
 
@@ -249,11 +367,33 @@ export async function POST(req: NextRequest) {
 
         // сборка DOCX из переведенной части
         send({ type: "building", message: "Building DOCX file..." });
-        const paragraphs = translated.join("\n\n").split("\n");
-        const url = await buildAndUploadDocx(paragraphs, process.env.BLOB_READ_WRITE_TOKEN);
+        const paragraphs = translated.join("\n\n").split("\n").map((p) => p.trim());
+        let url: string;
+        try {
+          url = await buildAndUploadDocx(paragraphs, process.env.BLOB_READ_WRITE_TOKEN);
+        } catch (err: any) {
+          send({ type: "error", message: `Failed to build/upload DOCX: ${err?.message || err}` });
+          controller.close();
+          return;
+        }
 
         const elapsed = Math.round((Date.now() - startAt) / 1000);
-        const partial = translated.length < totalChunks || elapsed >= HARD_TIME_LIMIT_MS / 1000;
+        const partial = translated.length < totalChunks || elapsed >= Math.round(HARD_TIME_LIMIT_MS / 1000);
+
+        // финальные метрики
+        const avgFinal =
+          chunkDurations.length > 0
+            ? Math.round(chunkDurations.reduce((a, b) => a + b, 0) / chunkDurations.length)
+            : 0;
+        send({
+          type: "metrics_final",
+          averageLatencyMs: avgFinal,
+          totalChunksCompleted: translated.length,
+          failedChunks,
+          totalPromptTokens: totalPromptTokens || undefined,
+          totalCompletionTokens: totalCompletionTokens || undefined,
+          elapsedSeconds: elapsed,
+        });
 
         send({
           type: "completed",
@@ -264,6 +404,7 @@ export async function POST(req: NextRequest) {
             model,
             elapsedSeconds: elapsed,
             partial,
+            failedChunks,
             notice: partial
               ? "The document was translated partially. Current version has a 300-second translation time limit."
               : undefined,
@@ -272,8 +413,7 @@ export async function POST(req: NextRequest) {
       } catch (err: any) {
         console.error("[TRANSLATE] error:", err);
         const msg = err?.message || "Translation failed";
-        // шлём ошибку в поток и закрываем
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "error", message: msg })}\n\n`));
+        send({ type: "error", message: msg });
       } finally {
         controller.close();
       }

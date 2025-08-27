@@ -26,6 +26,15 @@ interface TranslationResult {
   };
 }
 
+interface LiveMetrics {
+  averageMs: number;
+  lastMs: number;
+  completedChunks: number;
+  failedChunks?: number;
+  totalPromptTokens?: number;
+  totalCompletionTokens?: number;
+}
+
 const languages = [
   { code: 'en', name: 'English' },
   { code: 'ru', name: 'Russian' },
@@ -41,7 +50,7 @@ const languages = [
 
 const models = [
   { id: 'gpt-4o-mini', name: 'GPT-4o Mini (Fast & Cost-effective)'},
-  { id: 'gpt-5-mini', name: 'GPT-5 Mini' }, // ← без лишнего описания
+  { id: 'gpt-5-mini', name: 'GPT-5 Mini' },
   { id: 'gpt-4o', name: 'GPT-4o (Balanced)' },
   { id: 'gpt-4', name: 'GPT-4 (Highest Quality)' },
   { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo (Budget)' },
@@ -56,6 +65,8 @@ export default function Home() {
   const [result, setResult] = useState<TranslationResult | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [metrics, setMetrics] = useState<LiveMetrics | null>(null);
 
   // безопасный доступ к переменной окружения
   const DONATE_LINK = process.env.NEXT_PUBLIC_DONATION_LINK ?? '';
@@ -72,6 +83,7 @@ export default function Home() {
     setFile(selectedFile);
     setResult(null);
     setProgress({ stage: 'idle' });
+    setMetrics(null);
   }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -116,6 +128,7 @@ export default function Home() {
 
   const translateFile = async (fileUrl: string) => {
     setProgress({ stage: 'translating', message: 'Starting translation...' });
+    setMetrics(null);
 
     try {
       const response = await fetch('/api/translate', {
@@ -161,7 +174,44 @@ export default function Home() {
                 stage: 'translating',
                 currentChunk: data.currentChunk,
                 totalChunks: data.totalChunks,
-                message: `Translating chunk ${data.currentChunk}/${data.totalChunks}...`,
+                message: data.message || `Translating chunk ${data.currentChunk}/${data.totalChunks}...`,
+              });
+              continue;
+            }
+
+            if (data.type === 'chunk') {
+              // optional: keep last chunk metrics too
+              setMetrics((prev) => ({
+                averageMs: prev?.averageMs ?? 0,
+                lastMs: data.durationMs ?? prev?.lastMs ?? 0,
+                completedChunks: prev?.completedChunks ?? 0,
+                failedChunks: prev?.failedChunks ?? 0,
+                totalPromptTokens: prev?.totalPromptTokens,
+                totalCompletionTokens: prev?.totalCompletionTokens,
+              }));
+              continue;
+            }
+
+            if (data.type === 'metrics') {
+              setMetrics({
+                averageMs: data.averageLatencyMs ?? 0,
+                lastMs: data.lastLatencyMs ?? 0,
+                completedChunks: data.completedChunks ?? 0,
+                failedChunks: data.failedChunks ?? 0,
+                totalPromptTokens: data.totalPromptTokens,
+                totalCompletionTokens: data.totalCompletionTokens,
+              });
+              continue;
+            }
+
+            if (data.type === 'metrics_final') {
+              setMetrics({
+                averageMs: data.averageLatencyMs ?? 0,
+                lastMs: data.averageLatencyMs ?? 0,
+                completedChunks: data.totalChunksCompleted ?? 0,
+                failedChunks: data.failedChunks ?? 0,
+                totalPromptTokens: data.totalPromptTokens,
+                totalCompletionTokens: data.totalCompletionTokens,
               });
               continue;
             }
@@ -351,6 +401,36 @@ export default function Home() {
                     <span className="text-gray-500">{Math.round(getProgressPercentage())}%</span>
                   </div>
                   <Progress value={getProgressPercentage()} className="h-2" />
+
+                  {/* Live metrics */}
+                  {metrics && (
+                    <div className="mt-2 text-sm text-gray-600 grid grid-cols-2 gap-2">
+                      <div>
+                        <div className="font-medium">Average chunk latency</div>
+                        <div>{metrics.averageMs} ms</div>
+                      </div>
+                      <div>
+                        <div className="font-medium">Last chunk</div>
+                        <div>{metrics.lastMs} ms</div>
+                      </div>
+                      <div>
+                        <div className="font-medium">Chunks completed</div>
+                        <div>{metrics.completedChunks}</div>
+                      </div>
+                      <div>
+                        <div className="font-medium">Failed chunks</div>
+                        <div>{metrics.failedChunks ?? 0}</div>
+                      </div>
+                      {(metrics.totalPromptTokens || metrics.totalCompletionTokens) && (
+                        <div className="col-span-2">
+                          <div className="font-medium">Token usage (approx)</div>
+                          <div>
+                            {metrics.totalPromptTokens ?? 0} in / {metrics.totalCompletionTokens ?? 0} out
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
