@@ -55,6 +55,30 @@ async function lazyLoadHeavy() {
   return { pdfParse, docx };
 }
 
+// --- Новый вспомогательный fallback через pdfjs-dist ---
+// (динамически импортируется только при необходимости)
+async function extractTextWithPdfJs(buffer: Buffer | Uint8Array) {
+  // импортируем только при реальной необходимости (не грузим всегда)
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.js");
+  // Если нужно, можно настроить workerSrc, но в node-окружении это не требуется.
+  const uint8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+
+  const loadingTask = pdfjs.getDocument({ data: uint8 });
+  const doc = await loadingTask.promise;
+  const numPages = doc.numPages || 0;
+  let fullText = "";
+
+  for (let p = 1; p <= numPages; p++) {
+    const page = await doc.getPage(p);
+    const content = await page.getTextContent();
+    // content.items содержит объекты с полем .str (или similar)
+    const pageText = content.items.map((it: any) => (it && (it.str || it.toString()) ? it.str || String(it) : "")).join(" ");
+    fullText += (fullText ? "\n\n" : "") + pageText;
+  }
+
+  return { text: fullText.trim(), numPages };
+}
+
 // системный промпт
 function systemPrompt(src: string, dst: string) {
   return `You are a precise, professional academic translator.
@@ -160,12 +184,43 @@ export async function POST(req: NextRequest) {
           controller.close();
           return;
         }
-        const pdfBuffer = Buffer.from(await pdfRes.arrayBuffer());
+
+        // Отправляем диагностические заголовки и размер для отладки
+        const contentTypeHeader = pdfRes.headers.get("content-type") || "unknown";
+        send({ type: "log", message: `PDF Content-Type: ${contentTypeHeader}` });
+
+        const pdfArrayBuffer = await pdfRes.arrayBuffer();
+        const pdfBuffer = Buffer.from(pdfArrayBuffer);
+        send({ type: "log", message: `Downloaded PDF size: ${pdfBuffer.length} bytes` });
 
         // вытаскиваем текст и число страниц
         const { pdfParse } = await lazyLoadHeavy();
         send({ type: "log", message: "Extracting text from PDF..." });
-        const pdfData = await pdfParse(pdfBuffer);
+
+        let pdfData: any = null;
+        try {
+          // основной парсер
+          pdfData = await pdfParse(pdfBuffer);
+          send({ type: "log", message: "pdf-parse succeeded" });
+        } catch (parseErr: any) {
+          // подробный лог об ошибке парсера
+          send({ type: "log", message: `pdf-parse failed: ${String(parseErr?.message || parseErr)}` });
+
+          // попытка fallback через pdfjs-dist (если установлена)
+          try {
+            send({ type: "log", message: "Attempting fallback extraction with pdfjs-dist..." });
+            const fallback = await extractTextWithPdfJs(pdfBuffer);
+            pdfData = { info: { numpages: fallback.numPages }, text: fallback.text };
+            send({ type: "log", message: `pdfjs-dist fallback succeeded, pages=${fallback.numPages}` });
+          } catch (fallbackErr: any) {
+            // если fallback упал — отправляем детальную ошибку и завершаем
+            send({ type: "log", message: `pdfjs-dist fallback failed: ${String(fallbackErr?.message || fallbackErr)}` });
+            send({ type: "error", message: "Invalid PDF structure" });
+            controller.close();
+            return;
+          }
+        }
+
         const totalPages = pdfData?.info?.numpages ?? 0;
         const fullText = (pdfData?.text ?? "").trim();
 
@@ -378,6 +433,14 @@ export async function POST(req: NextRequest) {
         }
 
         const elapsed = Math.round((Date.now() - startAt) / 1000);
+        // более корректное pagesProcessed: если pdf парсер вернул real totalPages — используем его,
+        // иначе оцениваем на основе успешно переведённых чанков.
+        const successfulChunks = translated.filter((t) => !!(t && t.trim().length)).length;
+        const estimatedPagesProcessed = successfulChunks * Math.max(1, chunkSizePages);
+        const pagesProcessed = totalPages && totalPages > 0
+          ? Math.min(totalPages, estimatedPagesProcessed)
+          : estimatedPagesProcessed;
+
         const partial = translated.length < totalChunks || elapsed >= Math.round(HARD_TIME_LIMIT_MS / 1000);
 
         // финальные метрики
@@ -399,8 +462,7 @@ export async function POST(req: NextRequest) {
           type: "completed",
           result: {
             downloadUrl: url,
-            pagesProcessed:
-              Math.min(totalPages || 0, translated.length * Math.max(1, chunkSizePages)),
+            pagesProcessed,
             model,
             elapsedSeconds: elapsed,
             partial,
