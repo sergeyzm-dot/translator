@@ -2,17 +2,16 @@
 const nextConfig = {
   reactStrictMode: true,
 
-  // было: experimental.serverComponentsExternalPackages
-  // стало:
   serverExternalPackages: [
     'pdf-parse',
     'docx',
     'openai',
     'stripe',
+    'pdfjs-dist' // <-- добавлено, чтобы pdfjs не бандлился в клиент
   ],
 
   // swcMinify больше не нужен в Next 15
-  // swcMinify: true,  // ← удалить
+  // swcMinify: true,
 };
 
 module.exports = nextConfig;
